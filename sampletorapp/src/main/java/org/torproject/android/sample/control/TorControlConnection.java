@@ -13,7 +13,6 @@ import java.io.PrintWriter;
 import java.io.Reader;
 import java.io.Writer;
 import java.net.Socket;
-import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -22,7 +21,8 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.StringTokenizer;
-import java.util.concurrent.CancellationException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** A connection to a running Tor process as specified in control-spec.txt. */
 public class TorControlConnection implements TorControlCommands {
@@ -36,15 +36,15 @@ public class TorControlConnection implements TorControlCommands {
     private volatile EventHandler handler;
     private volatile PrintWriter debugOutput;
     private volatile IOException parseThreadException;
-    
+
     static class Waiter {
-    
+
         List<ReplyLine> response; // Locking: this
-    
+
         synchronized List<ReplyLine> getResponse() throws InterruptedException {
-                while (response == null) {
-                    wait();
-                }
+            while (response == null) {
+                wait();
+            }
             return response;
         }
 
@@ -64,7 +64,7 @@ public class TorControlConnection implements TorControlCommands {
             this.status = status; this.msg = msg; this.rest = rest;
         }
     }
-    
+
     /** Create a new TorControlConnection to communicate with Tor over
      * a given socket.  After calling this constructor, it is typical to
      * call launchThread and authenticate. */
@@ -112,13 +112,13 @@ public class TorControlConnection implements TorControlCommands {
         for (int i = 0; i < s.length(); ++i) {
             char c = s.charAt(i);
             switch (c)
-                {
+            {
                 case '\r':
                 case '\n':
                 case '\\':
                 case '\"':
                     sb.append('\\');
-                }
+            }
             sb.append(c);
         }
         sb.append('\"');
@@ -134,12 +134,12 @@ public class TorControlConnection implements TorControlCommands {
                 // if line is null, the end of the stream has been reached, i.e.
                 // the connection to Tor has been closed!
                 if (reply.isEmpty()) {
-                        // nothing received so far, can exit cleanly
-                        return reply;
-                } 
+                    // nothing received so far, can exit cleanly
+                    return reply;
+                }
                 // received half of a reply before the connection broke down
                 throw new TorControlSyntaxError("Connection to Tor " +
-                     " broke down while receiving reply!");
+                        " broke down while receiving reply!");
             }
             if (debugOutput != null)
                 debugOutput.println("<< "+line);
@@ -170,7 +170,7 @@ public class TorControlConnection implements TorControlCommands {
     }
 
     protected synchronized List<ReplyLine> sendAndWaitForResponse(String s,
-        String rest) throws IOException {
+                                                                  String rest) throws IOException {
         if(parseThreadException != null) throw parseThreadException;
         checkThread();
         Waiter w = new Waiter();
@@ -192,7 +192,7 @@ public class TorControlConnection implements TorControlCommands {
         for (Iterator<ReplyLine> i = lst.iterator(); i.hasNext(); ) {
             ReplyLine c = i.next();
             if (! c.status.startsWith("2"))
-                throw new TorControlError("Error reply: "+c.msg);
+                throw new TorControlError(Integer.valueOf(c.status),"Error reply: "+c.msg);
         }
         return lst;
     }
@@ -205,21 +205,23 @@ public class TorControlConnection implements TorControlCommands {
 
         for (Iterator<ReplyLine> i = events.iterator(); i.hasNext(); ) {
             ReplyLine line = i.next();
+            if (line.msg.startsWith("OK"))
+                continue;
             int idx = line.msg.indexOf(' ');
             String tp = line.msg.substring(0, idx).toUpperCase();
             String rest = line.msg.substring(idx+1);
             if (tp.equals("CIRC")) {
                 List<String> lst = Bytes.splitStr(null, rest);
                 handler.circuitStatus(lst.get(1),
-                                      lst.get(0),
-                                      lst.get(1).equals("LAUNCHED")
-                                          || lst.size() < 3 ? ""
-                                          : lst.get(2));
+                        lst.get(0),
+                        lst.get(1).equals("LAUNCHED")
+                                || lst.size() < 3 ? ""
+                                : lst.get(2));
             } else if (tp.equals("STREAM")) {
                 List<String> lst = Bytes.splitStr(null, rest);
                 handler.streamStatus(lst.get(1),
-                                     lst.get(0),
-                                     lst.get(3));
+                        lst.get(0),
+                        lst.get(3));
                 // XXXX circID.
             } else if (tp.equals("ORCONN")) {
                 List<String> lst = Bytes.splitStr(null, rest);
@@ -227,16 +229,28 @@ public class TorControlConnection implements TorControlCommands {
             } else if (tp.equals("BW")) {
                 List<String> lst = Bytes.splitStr(null, rest);
                 handler.bandwidthUsed(Integer.parseInt(lst.get(0)),
-                                      Integer.parseInt(lst.get(1)));
+                        Integer.parseInt(lst.get(1)));
             } else if (tp.equals("NEWDESC")) {
                 List<String> lst = Bytes.splitStr(null, rest);
                 handler.newDescriptors(lst);
             } else if (tp.equals("DEBUG") ||
-                       tp.equals("INFO") ||
-                       tp.equals("NOTICE") ||
-                       tp.equals("WARN") ||
-                       tp.equals("ERR")) {
+                    tp.equals("INFO") ||
+                    tp.equals("NOTICE") ||
+                    tp.equals("WARN") ||
+                    tp.equals("ERR")) {
                 handler.message(tp, rest);
+            } else if (tp.equals("HS_DESC")) {
+                List<String> lst = Bytes.splitStr(null, rest);
+                Matcher matcher;
+                if ("FAILED".equals(lst.get(0))) {
+                    matcher = Pattern.compile("REASON=([^\\s]*)").matcher(rest);
+                    handler.hiddenServiceFailedEvent(matcher.find() ? matcher.group(1) : "NO_REASON", rest);
+                } else {
+                    handler.hiddenServiceEvent(lst.get(0), rest);
+                }
+            } else if (tp.equals("HS_DESC_CONTENT")) {
+                List<String> lst = Bytes.splitStr(null, rest);
+                handler.hiddenServiceDescriptor(lst.get(1), lst.size() > 3 ? lst.get(3) : "NO_DESCRIPTOR", rest);
             } else {
                 handler.unrecognized(tp, rest);
             }
@@ -244,20 +258,20 @@ public class TorControlConnection implements TorControlCommands {
     }
 
 
-    /** Sets <b>w</b> as the PrintWriter for debugging output, 
-    * which writes out all messages passed between Tor and the controller.  
-    * Outgoing messages are preceded by "\>\>" and incoming messages are preceded
-    * by "\<\<"
-    */
+    /** Sets <b>w</b> as the PrintWriter for debugging output,
+     * which writes out all messages passed between Tor and the controller.
+     * Outgoing messages are preceded by "\>\>" and incoming messages are preceded
+     * by "\<\<"
+     */
     public void setDebugging(PrintWriter w) {
         debugOutput = w;
     }
-    
-    /** Sets <b>s</b> as the PrintStream for debugging output, 
-    * which writes out all messages passed between Tor and the controller.  
-    * Outgoing messages are preceded by "\>\>" and incoming messages are preceded
-    * by "\<\<"
-    */
+
+    /** Sets <b>s</b> as the PrintStream for debugging output,
+     * which writes out all messages passed between Tor and the controller.
+     * Outgoing messages are preceded by "\>\>" and incoming messages are preceded
+     * by "\<\<"
+     */
     public void setDebugging(PrintStream s) {
         debugOutput = new PrintWriter(s, true);
     }
@@ -275,7 +289,7 @@ public class TorControlConnection implements TorControlCommands {
      * responses that arrive independantly over the same socket.
      */
     public synchronized Thread launchThread(boolean daemon) {
-    	ControlParseThread th = new ControlParseThread();
+        ControlParseThread th = new ControlParseThread();
         if (daemon)
             th.setDaemon(true);
         th.start();
@@ -285,8 +299,12 @@ public class TorControlConnection implements TorControlCommands {
 
     protected class ControlParseThread extends Thread {
 
+        public ControlParseThread() {
+            setName("TorControlParser");
+        }
+
         @Override
-    	public void run() {
+        public void run() {
             try {
                 react();
             } catch (IOException ex) {
@@ -312,16 +330,37 @@ public class TorControlConnection implements TorControlCommands {
                 handleEvent(lst);
             else {
                 synchronized (waiters) {
- 		if (!waiters.isEmpty())
-		{
-                    Waiter w;
-                    w = waiters.removeFirst();
-                    w.setResponse(lst);
-		}
-                }		
+                    if (!waiters.isEmpty())
+                    {
+                        Waiter w;
+                        w = waiters.removeFirst();
+                        w.setResponse(lst);
+                    }
+                }
 
             }
         }
+    }
+
+    /**
+     * 3.2. RESETCONF
+     *
+     * Remove all settings for a given configuration option entirely, assign its
+     * default value (if any), and then assign the String provided. Typically the
+     * String is left empty, to simply set an option back to its default. The syntax
+     * is: <br>
+     * "RESETCONF" 1*(SP keyword ["=" String]) CRLF
+     * <p>
+     * ["=" String] is not supported (yet?)
+     *
+     * @param keyword
+     * @throws IOException
+     */
+    public void resetConf(String keyword) throws IOException {
+        StringBuffer b = new StringBuffer("RESETCONF");
+        b.append(" ").append(keyword);
+        b.append("\r\n");
+        sendAndWaitForResponse(b.toString(), null);
     }
 
     /** Change the value of the configuration option 'key' to 'val'.
@@ -358,7 +397,7 @@ public class TorControlConnection implements TorControlCommands {
      * the others.  For example, if two ORBindAddress values are configured, and a
      * command arrives containing a single ORBindAddress value, the new
      * command's value replaces the two old values.
-     * 
+     *
      * To remove all settings for a given option entirely (and go back to its
      * default value), include a String in <b>kvList</b> containing the key and no value.
      */
@@ -372,12 +411,12 @@ public class TorControlConnection implements TorControlCommands {
             if (i == -1)
                 b.append(" ").append(kv);
             b.append(" ").append(kv.substring(0,i)).append("=")
-                .append(quote(kv.substring(i+1)));
+                    .append(quote(kv.substring(i+1)));
         }
         b.append("\r\n");
         sendAndWaitForResponse(b.toString(), null);
     }
-    
+
     /** Try to reset the values listed in the collection 'keys' to their
      * default values.
      **/
@@ -402,7 +441,7 @@ public class TorControlConnection implements TorControlCommands {
 
     /** Requests the values of the configuration variables listed in <b>keys</b>.
      * Results are returned as a list of ConfigEntry objects.
-     * 
+     *
      * If an option appears multiple times in the configuration, all of its
      * key-value pairs are returned in order.
      *
@@ -426,7 +465,7 @@ public class TorControlConnection implements TorControlCommands {
             int idx = kv.indexOf('=');
             if (idx >= 0)
                 result.add(new ConfigEntry(kv.substring(0, idx),
-                                           kv.substring(idx+1)));
+                        kv.substring(idx+1)));
             else
                 result.add(new ConfigEntry(kv));
         }
@@ -434,10 +473,10 @@ public class TorControlConnection implements TorControlCommands {
     }
 
     /** Request that the server inform the client about interesting events.
-     * Each element of <b>events</b> is one of the following Strings: 
+     * Each element of <b>events</b> is one of the following Strings:
      * ["CIRC" | "STREAM" | "ORCONN" | "BW" | "DEBUG" |
      *  "INFO" | "NOTICE" | "WARN" | "ERR" | "NEWDESC" | "ADDRMAP"] .
-     * 
+     *
      * Any events not listed in the <b>events</b> are turned off; thus, calling
      * setEvents with an empty <b>events</b> argument turns off all event reporting.
      */
@@ -452,13 +491,13 @@ public class TorControlConnection implements TorControlCommands {
 
     /** Authenticates the controller to the Tor server.
      *
-     * By default, the current Tor implementation trusts all local users, and 
+     * By default, the current Tor implementation trusts all local users, and
      * the controller can authenticate itself by calling authenticate(new byte[0]).
      *
      * If the 'CookieAuthentication' option is true, Tor writes a "magic cookie"
      * file named "control_auth_cookie" into its data directory.  To authenticate,
      * the controller must send the contents of this file in <b>auth</b>.
-     * 
+     *
      * If the 'HashedControlPassword' option is set, <b>auth</b> must contain the salted
      * hash of a secret password.  The salted hash is computed according to the
      * S2K algorithm in RFC 2440 (OpenPGP), and prefixed with the s2k specifier.
@@ -481,6 +520,64 @@ public class TorControlConnection implements TorControlCommands {
     public void saveConf() throws IOException {
         sendAndWaitForResponse("SAVECONF\r\n", null);
     }
+/*
+*
+*
+* https://github.com/torproject/torspec/blob/master/control-spec.txt
+ * 3.26. HSFETCH
+ *
+ *   The syntax is:
+ *     "HSFETCH" SP (HSAddress / "v" Version "-" DescId)
+ *               *[SP "SERVER=" Server] CRLF
+ *
+ *     HSAddress = 16*Base32Character / 56*Base32Character
+ *     Version = "2" / "3"
+ *     DescId = 32*Base32Character
+ *     Server = LongName
+ *
+ *   This command launches hidden service descriptor fetch(es) for the given
+ *   HSAddress or DescId.
+ *
+ *   HSAddress can be version 2 or version 3 addresses. DescIDs can only be
+ *   version 2 IDs. Version 2 addresses consist of 16*Base32Character and
+ *   version 3 addresses consist of 56*Base32Character.
+ *
+ *   If a DescId is specified, at least one Server MUST also be provided,
+ *   otherwise a 512 error is returned. If no DescId and Server(s) are specified,
+ *   it behaves like a normal Tor client descriptor fetch. If one or more
+ *   Server are given, they are used instead triggering a fetch on each of them
+ *   in parallel.
+ *
+ *   The caching behavior when fetching a descriptor using this command is
+ *   identical to normal Tor client behavior.
+ *
+ *   Details on how to compute a descriptor id (DescId) can be found in
+ *   rend-spec.txt section 1.3.
+ *
+ *   If any values are unrecognized, a 513 error is returned and the command is
+ *   stopped. On success, Tor replies "250 OK" then Tor MUST eventually follow
+ *   this with both a HS_DESC and HS_DESC_CONTENT events with the results. If
+ *   SERVER is specified then events are emitted for each location.
+ *
+ *   Examples are:
+ *      C: HSFETCH v2-gezdgnbvgy3tqolbmjrwizlgm5ugs2tl
+ *         SERVER=9695DFC35FFEB861329B9F1AB04C46397020CE31
+ *      S: 250 OK
+ *
+ *      C: HSFETCH ajkhdsfuygaesfaa
+ *      S: 250 OK
+ *
+ *      C: HSFETCH vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd
+ *      S: 250 OK
+ *
+ *   [HSFETCH was added in Tor 0.2.7.1-alpha]
+ *   [HS v3 support added 0.4.1.1-alpha]
+ *
+ */
+    public boolean isHSAvailable(String onionurl) throws IOException {
+        final List<ReplyLine> response = sendAndWaitForResponse("HSFETCH "+onionurl+"\r\n", null);
+        return response.get(0).status.trim().equals("250");
+    }
 
     /** Sends a signal from the controller to the Tor server.
      * <b>signal</b> is one of the following Strings:
@@ -502,7 +599,6 @@ public class TorControlConnection implements TorControlCommands {
      * Does not wait for a response. */
     public void shutdownTor(String signal) throws IOException {
         String s = "SIGNAL " + signal + "\r\n";
-        Waiter w = new Waiter();
         if (debugOutput != null)
             debugOutput.print(">> "+s);
         synchronized (waiters) {
@@ -523,7 +619,7 @@ public class TorControlConnection implements TorControlCommands {
      * should ensure that it returns an element of address space that is unlikely
      * to be in actual use.  If there is already an address mapped to the
      * destination address, the server may reuse that mapping.
-     * 
+     *
      * If the original address is already mapped to a different address, the old
      * mapping is removed.  If the original address and the destination address
      * are the same, the server removes any mapping in place for the original
@@ -540,7 +636,7 @@ public class TorControlConnection implements TorControlCommands {
             String kv = it.next();
             int i = kv.indexOf(' ');
             sb.append(" ").append(kv.substring(0,i)).append("=")
-                .append(quote(kv.substring(i+1)));
+                    .append(quote(kv.substring(i+1)));
         }
         sb.append("\r\n");
         List<ReplyLine> lst = sendAndWaitForResponse(sb.toString(), null);
@@ -549,7 +645,7 @@ public class TorControlConnection implements TorControlCommands {
             String kv = (it.next()).msg;
             int idx = kv.indexOf('=');
             result.put(kv.substring(0, idx),
-                       kv.substring(idx+1));
+                    kv.substring(idx+1));
         }
         return result;
     }
@@ -624,9 +720,9 @@ public class TorControlConnection implements TorControlCommands {
         }
         return m;
     }
-    
-    
-    
+
+
+
     /** Return the value of the information field 'key' */
     public String getInfo(String key) throws IOException {
         List<String> lst = new ArrayList<String>();
@@ -645,22 +741,22 @@ public class TorControlConnection implements TorControlCommands {
      */
     public String extendCircuit(String circID, String path) throws IOException {
         List<ReplyLine> lst = sendAndWaitForResponse(
-                          "EXTENDCIRCUIT "+circID+" "+path+"\r\n", null);
+                "EXTENDCIRCUIT "+circID+" "+path+"\r\n", null);
         return (lst.get(0)).msg;
     }
-    
+
     /** Informs the Tor server that the stream specified by <b>streamID</b> should be
-     * associated with the circuit specified by <b>circID</b>.  
-     * 
+     * associated with the circuit specified by <b>circID</b>.
+     *
      * Each stream may be associated with
      * at most one circuit, and multiple streams may share the same circuit.
      * Streams can only be attached to completed circuits (that is, circuits that
      * have sent a circuit status "BUILT" event or are listed as built in a
      * getInfo circuit-status request).
-     * 
+     *
      * If <b>circID</b> is 0, responsibility for attaching the given stream is
      * returned to Tor.
-     * 
+     *
      * By default, Tor automatically attaches streams to
      * circuits itself, unless the configuration variable
      * "__LeaveStreamsUnattached" is set to "1".  Attempting to attach streams
@@ -668,12 +764,12 @@ public class TorControlConnection implements TorControlCommands {
      * Tor and the controller, as both attempt to attach streams to circuits.
      */
     public void attachStream(String streamID, String circID)
-        throws IOException {
+            throws IOException {
         sendAndWaitForResponse("ATTACHSTREAM "+streamID+" "+circID+"\r\n", null);
     }
 
     /** Tells Tor about the server descriptor in <b>desc</b>.
-     * 
+     *
      * The descriptor, when parsed, must contain a number of well-specified
      * fields, including fields for its nickname and identity.
      */
@@ -686,14 +782,14 @@ public class TorControlConnection implements TorControlCommands {
 
     /** Tells Tor to change the exit address of the stream identified by <b>streamID</b>
      * to <b>address</b>. No remapping is performed on the new provided address.
-     * 
+     *
      * To be sure that the modified address will be used, this event must be sent
      * after a new stream event is received, and before attaching this stream to
      * a circuit.
      */
     public void redirectStream(String streamID, String address) throws IOException {
         sendAndWaitForResponse("REDIRECTSTREAM "+streamID+" "+address+"\r\n",
-                               null);
+                null);
     }
 
     /** Tells Tor to close the stream identified by <b>streamID</b>.
@@ -717,7 +813,7 @@ public class TorControlConnection implements TorControlCommands {
      * Tor may hold the stream open for a while to flush any data that is pending.
      */
     public void closeStream(String streamID, byte reason)
-        throws IOException {
+            throws IOException {
         sendAndWaitForResponse("CLOSESTREAM "+streamID+" "+reason+"\r\n",null);
     }
 
@@ -726,7 +822,7 @@ public class TorControlConnection implements TorControlCommands {
      */
     public void closeCircuit(String circID, boolean ifUnused) throws IOException {
         sendAndWaitForResponse("CLOSECIRCUIT "+circID+
-                               (ifUnused?" IFUNUSED":"")+"\r\n", null);
+                (ifUnused?" IFUNUSED":"")+"\r\n", null);
     }
 
     /** Tells Tor to exit when this control connection is closed. This command
@@ -742,5 +838,275 @@ public class TorControlConnection implements TorControlCommands {
     public void forgetHiddenService(String hostname) throws IOException {
         sendAndWaitForResponse("FORGETHS " + hostname + "\r\n", null);
     }
-}
 
+    /**
+     * "ADD_ONION" SP KeyType ":" KeyBlob [SP "Flags=" Flag *("," Flag)] [SP
+     * "MaxStreams=" NumStreams] 1*(SP "Port=" VirtPort ["," Target]) (SP
+     * "ClientAuth=" ClientName [":" ClientBlob]) CRLF
+     *
+     * KeyType = "NEW" / ; The server should generate a key of algorithm KeyBlob
+     * "RSA1024" / ; The server should use the 1024 bit RSA key provided in as
+     * KeyBlob "ED25519-V3"; The server should use the ed25519 v3 key provided in as
+     * KeyBlob
+     *
+     * KeyBlob = "BEST" / ; The server should generate a key using the "best"
+     * supported algorithm (KeyType == "NEW") "RSA1024" / ; The server should
+     * generate a 1024 bit RSA key (KeyType == "NEW") "ED25519-V3"; The server
+     * should generate an ed25519 private key (KeyType == "NEW") String ; A
+     * serialized private key (without whitespace)
+     *
+     * Flag = "DiscardPK" / ; The server should not include the newly generated
+     * private key as part of the response. "Detach" / ; Do not associate the newly
+     * created Onion Service to the current control connection. "BasicAuth" / ;
+     * Client authorization is required using the "basic" method. "NonAnonymous" /;
+     * Add a non-anonymous Single Onion Service. Tor checks this flag matches its
+     * configured hidden service anonymity mode. "MaxStreamsCloseCircuit"; Close the
+     * circuit is the maximum streams allowed is reached.
+     *
+     * NumStreams = A value between 0 and 65535 which is used as the maximum streams
+     * that can be attached on a rendezvous circuit. Setting it to 0 means unlimited
+     * which is also the default behavior.
+     *
+     * VirtPort = The virtual TCP Port for the Onion Service (As in the
+     * HiddenServicePort "VIRTPORT" argument).
+     *
+     * Target = The (optional) target for the given VirtPort (As in the optional
+     * HiddenServicePort "TARGET" argument).
+     *
+     * ClientName = An identifier 1 to 16 characters long, using only characters in
+     * A-Za-z0-9+-_ (no spaces).
+     *
+     * ClientBlob = Authorization data for the client, in an opaque format specific
+     * to the authorization method.
+     *
+     * The server reply format is: "250-ServiceID=" ServiceID CRLF
+     * ["250-PrivateKey=" KeyType ":" KeyBlob CRLF] ("250-ClientAuth=" ClientName
+     * ":" ClientBlob CRLF) "250 OK" CRLF
+     *
+     * ServiceID = The Onion Service address without the trailing ".onion" suffix
+     *
+     * @throws IOException
+     */
+    public CreateHiddenServiceResult createHiddenService(Integer port) throws IOException {
+        return createHiddenService(port, -1, "NEW:BEST");
+    }
+
+    public CreateHiddenServiceResult createHiddenService(Integer virtPort, Integer targetPort) throws IOException {
+        return createHiddenService(virtPort, targetPort, "NEW:BEST");
+    }
+
+    /**
+     * supported algorithms according to
+     * https://github.com/torproject/torspec/raw/4421149986369b4f746fc02a5d78c7337fe5d4ea/control-spec.txt
+     */
+    private final static String[] algorithms = { "RSA1024", "ED25519-V3" };
+
+
+    public CreateHiddenServiceResult createHiddenService(Integer port, String private_key) throws IOException {
+        return createHiddenService(port, -1, private_key);
+    }
+
+    public CreateHiddenServiceResult createHiddenService(Integer virtPort, Integer targetPort, String private_key)
+            throws IOException {
+
+        // assemble port string
+        String port = virtPort.toString();
+
+        if (targetPort > 0)
+            port += "," + targetPort;
+
+        /*
+         * we could try to decode the supplied key and somehow get its type, however, as
+         * Java does not want to read PKCS1-encoded PEM without external help, we let
+         * the Tor binary do the math.
+         */
+        List<ReplyLine> result = null;
+        for (String algorithm : algorithms)
+            try {
+                result = sendAndWaitForResponse(
+                        "ADD_ONION " + getPemPrivateKey(private_key, algorithm) + " Port=" + port + "\r\n", null);
+                break;
+            } catch (TorControlError e) {
+                if (e.getErrorType() != 513)
+                    throw new IOException(e.getMessage());
+            }
+
+        // in case result is still not properly filled, we do not know the correct
+        // key type. Maybe Tor has a new key type available?
+        if (null == result)
+            throw new IOException("Unsupported private_key algorithm. Did Tor get a new key type for hidden services?");
+
+        CreateHiddenServiceResult creationResult = new CreateHiddenServiceResult(result.get(0).msg.replace("ServiceID=", ""),
+                private_key.contains("NEW") ? result.get(1).msg.replace("PrivateKey=", "") : private_key);
+
+        /*
+         * by asking for the service we just created, Tor is going to aquire a suitable
+         * hidden service descriptor. When such a descriptor is not found in Tors local
+         * cache, Tor tries to publish the descriptor or at least the onion address. The
+         * nice thing about that is that a HSFETCH (i.e. what isHSAvailable does),
+         * triggers HS_DESC and HS_DESC_CONTENT events when Tor gets the information.
+         */
+        isHSAvailable(creationResult.serviceID);
+
+        return creationResult;
+    }
+
+    public class CreateHiddenServiceResult {
+        public final String serviceID;
+        public final String privateKey;
+
+        public CreateHiddenServiceResult(String serviceID, String privateKey) throws IOException {
+            this.serviceID = serviceID;
+
+            if (privateKey.startsWith("-----BEGIN")) // we reused a key
+                this.privateKey = privateKey;
+            else {
+                String type;
+                if (privateKey.startsWith(algorithms[0])) // i.e. RSA1024
+                    type = "RSA";
+                else if (privateKey.startsWith(algorithms[1])) // i.e. ED25519-V3
+                    type = "OPENSSH";
+                else
+                    throw new IOException(
+                            "Unsupported private_key algorithm. Did Tor get a new key type for hidden services?");
+
+                this.privateKey = "-----BEGIN " + type + " PRIVATE KEY-----\n"
+                        + privateKey.substring(privateKey.indexOf(":") + 1) + "\n-----END " + type
+                        + " PRIVATE KEY-----";
+            }
+        }
+    }
+
+    private String getPemPrivateKey(String keyBytes, String algorithm) {
+        // we do not need to construct anything in case Tor is about to generate a key
+        if (keyBytes.startsWith("NEW"))
+            return keyBytes;
+
+        // cleanup PEM artifacts
+        String temp = new String(keyBytes);
+        String privKeyPEM = temp.replaceAll("-----(BEGIN|END) ?[A-Z]* PRIVATE KEY-----", "");
+        privKeyPEM = privKeyPEM.replaceAll("\n", "");
+
+        // construct the key type and blob
+        return algorithm + ":" + privKeyPEM;
+    }
+
+    /**
+     * 3.28. DEL_ONION
+     *
+     * The syntax is: "DEL_ONION" SP ServiceID CRLF
+     *
+     * ServiceID = The Onion Service address without the trailing ".onion" suffix
+     *
+     * Tells the server to remove an Onion ("Hidden") Service, that was previously
+     * created via an "ADD_ONION" command. It is only possible to remove Onion
+     * Services that were created on the same control connection as the "DEL_ONION"
+     * command, and those that belong to no control connection in particular (The
+     * "Detach" flag was specified at creation).
+     *
+     * If the ServiceID is invalid, or is neither owned by the current control
+     * connection nor a detached Onion Service, the server will return a 552.
+     *
+     * It is the Onion Service server application's responsibility to close existing
+     * client connections if desired after the Onion Service has been removed via
+     * "DEL_ONION".
+     *
+     * Tor replies with "250 OK" on success, or a 512 if there are an invalid number
+     * of arguments, or a 552 if it doesn't recognize the ServiceID.
+     *
+     * [DEL_ONION was added in Tor 0.2.7.1-alpha.] [HS v3 support added
+     * 0.3.3.1-alpha]
+     */
+    public void destroyHiddenService(String name) throws IOException {
+        sendAndWaitForResponse("DEL_ONION " + name + "\r\n", null);
+    }
+
+    /**
+     * 3.24. AUTHCHALLENGE
+     *
+     * The syntax is: "AUTHCHALLENGE" SP "SAFECOOKIE" SP ClientNonce CRLF
+     *
+     * ClientNonce = 2*HEXDIG / QuotedString
+     *
+     * This command is used to begin the authentication routine for the SAFECOOKIE
+     * method of authentication.
+     *
+     * If the server accepts the command, the server reply format is: "250
+     * AUTHCHALLENGE" SP "SERVERHASH=" ServerHash SP "SERVERNONCE=" ServerNonce CRLF
+     *
+     * ServerHash = 64*64HEXDIG ServerNonce = 64*64HEXDIG
+     *
+     * The ClientNonce, ServerHash, and ServerNonce values are encoded/decoded in
+     * the same way as the argument passed to the AUTHENTICATE command. ServerNonce
+     * MUST be 32 bytes long.
+     *
+     * ServerHash is computed as: HMAC-SHA256("Tor safe cookie authentication
+     * server-to-controller hash", CookieString | ClientNonce | ServerNonce) (with
+     * the HMAC key as its first argument)
+     *
+     * After a controller sends a successful AUTHCHALLENGE command, the next command
+     * sent on the connection must be an AUTHENTICATE command, and the only
+     * authentication string which that AUTHENTICATE command will accept is:
+     * HMAC-SHA256("Tor safe cookie authentication controller-to-server hash",
+     * CookieString | ClientNonce | ServerNonce)
+     *
+     * [Unlike other commands besides AUTHENTICATE, AUTHCHALLENGE may be used (but
+     * only once!) before AUTHENTICATE.]
+     *
+     * [AUTHCHALLENGE was added in Tor 0.2.3.13-alpha.]
+     *
+     * @throws IOException
+     */
+    public AuthChallengeResult authChallenge(byte[] clientNonce) throws IOException {
+
+        List<ReplyLine> result = sendAndWaitForResponse(
+                "AUTHCHALLENGE SAFECOOKIE " + byteArrayToHexString(clientNonce) + "\r\n",
+                null);
+
+        if (!"250".equals(result.get(0).status)) {
+            String error = "";
+            for (ReplyLine line : result)
+                error += line.status + " " + line.msg + ",";
+
+            throw new IOException("Connection failed: " + error);
+        }
+
+        String tmp = result.get(0).msg;
+        final String SERVERHASH = "SERVERHASH";
+
+        String serverhash = tmp.substring(tmp.indexOf("=") + 1,
+                tmp.indexOf(" ", tmp.indexOf(SERVERHASH) + SERVERHASH.length()));
+        return new AuthChallengeResult(hexStringToByteArray(serverhash),
+                hexStringToByteArray(tmp.substring(tmp.lastIndexOf("=") + 1)));
+    }
+
+    public class AuthChallengeResult {
+        public final byte[] serverHash;
+        public final byte[] serverNonce;
+
+        public AuthChallengeResult(byte[] serverHash, byte[] serverNonce) {
+            this.serverHash = serverHash;
+            this.serverNonce = serverNonce;
+        }
+    }
+
+    private static String byteArrayToHexString(byte[] b) {
+        Character[] base16 = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
+
+        String result = "";
+
+        for (byte current : b)
+            result += base16[(current & 0xFF) >> 4] + "" + base16[current & 0xF];
+
+        return result;
+    }
+
+    private static byte[] hexStringToByteArray(String s) {
+        int len = s.length();
+        byte[] data = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4) + Character.digit(s.charAt(i + 1), 16));
+        }
+        return data;
+    }
+}

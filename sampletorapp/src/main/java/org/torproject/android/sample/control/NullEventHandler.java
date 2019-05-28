@@ -13,6 +13,9 @@ public class NullEventHandler implements EventHandler {
     public void bandwidthUsed(long read, long written) {}
     public void newDescriptors(java.util.List<String> orList) {}
     public void message(String severity, String msg) {}
+    public void hiddenServiceEvent(String action, String msg) {}
+    public void hiddenServiceFailedEvent(String reason, String msg) {}
+    public void hiddenServiceDescriptor(String descriptorId, String descriptor, String msg) {}
     public void unrecognized(String type, String msg) {}
 }
 

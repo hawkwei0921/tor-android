@@ -36,6 +36,18 @@ public class DebuggingEventHandler implements EventHandler {
         out.println("["+type+"] "+msg.trim());
     }
 
+    public void hiddenServiceEvent(String type, String msg) {
+        out.println("hiddenServiceEvent: HS_DESC " + msg.trim());
+    }
+
+    public void hiddenServiceFailedEvent(String reason, String msg) {
+        out.println("hiddenServiceEvent: HS_DESC " + msg.trim());
+    }
+
+    public void hiddenServiceDescriptor(String descriptorId, String descriptor, String msg) {
+        out.println("hiddenServiceEvent: HS_DESC_CONTENT " + msg.trim());
+    }
+
     public void unrecognized(String type, String msg) {
         out.println("unrecognized event ["+type+"] "+msg.trim());
     }

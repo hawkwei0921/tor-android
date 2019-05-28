@@ -15,7 +15,7 @@ import java.util.Map;
 import java.util.Iterator;
 
 public class Main implements TorControlCommands {
-
+    // Control Port Manual at https://github.com/torproject/torspec/blob/master/control-spec.txt
     public static void main(String args[]) {
         if (args.length < 1) {
             System.err.println("No command given.");
@@ -34,6 +34,8 @@ public class Main implements TorControlCommands {
                 signal(args);
             } else if (args[0].equals("auth")) {
                 authDemo(args);
+            } else if (args[0].equals("hs")) {
+                hsDemo(args);
             } else {
                 System.err.println("Unrecognized command: "+args[0]);
             }
@@ -62,6 +64,24 @@ public class Main implements TorControlCommands {
         throws IOException {
         return getConnection(args, true);
     }
+
+    private static void hsDemo(String[] args) throws IOException {
+        Socket s = new Socket("127.0.0.1", 9151);
+        TorControlConnection conn = new TorControlConnection(s);
+        conn.launchThread(true);
+        conn.authenticate(new byte[0]);
+
+        conn.setEventHandler(
+                new DebuggingEventHandler(new PrintWriter(System.out, true)));
+        conn.setEvents(Arrays.asList(new String[] { "EXTENDED", "CIRC", "ORCONN", "INFO", "NOTICE", "WARN", "ERR",
+                "HS_DESC", "HS_DESC_CONTENT" }));
+
+        TorControlConnection.CreateHiddenServiceResult result = conn.createHiddenService(10026);
+        conn.destroyHiddenService(result.serviceID);
+        conn.createHiddenService(10026, result.privateKey);
+
+    }
+
 
     public static void setConfig(String[] args) throws IOException {
         // Usage: "set-config [-save] key value key value key value"
